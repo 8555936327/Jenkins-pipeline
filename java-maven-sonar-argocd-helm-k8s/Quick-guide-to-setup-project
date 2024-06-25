@@ -1,0 +1,94 @@
+create ec2 instance with 4 core cpu and 8gb memory
+deploy jenkins 
+install docker software
+install sonarqube -- check README.md in the path java-maven-sonar-argocd*/spring-boot-app/README.md
+deploy minikube
+deloy argocd with below steps
+ a. https://operatorhub.io go to website
+ b. search for argocd click on only ArgoCD --> click on install and then follow all 3 steps
+ c. create file called argocd-basic.yml paste below content
+
+" apiVersion: argoproj.io/v1alpha1
+  kind: ArgoCD
+  metadata:
+    name: example-argocd
+    labels:
+      example: basic
+  spec: {} "
+
+  d. run kubectl apply -f argocd-basic.yml
+  e. kubectl get secret
+  f. kubectl edit secret example-argocd-cluster -- take the admin password and use command called echo -n admin_password | base64 -d 
+  g. take output of base64 -d command output and use as a password while loging to argocd UI and enter username as admin
+  h. for more info watch youtube video
+
+write jenkinsfile as below
+
+
+  
+pipeline {
+  agent {
+    docker {
+      image 'abhishekf5/maven-abhishek-docker-agent:v1'  // we use docker as a agent to perform all operations inside this container
+      args '--user root -v /var/run/docker.sock:/var/run/docker.sock' // mount Docker socket to access the host's Docker daemon
+    }
+  }
+  stages{
+      
+      stage('Git checkout'){      // checkout the branch which has main source code using github credentials
+          steps{
+             git branch: 'main', credentialsId: 'Github', url: 'https://github.com/8555936327/Jenkins-pipeline.git'
+          }
+      }
+      
+      stage('Build and test'){
+          steps{
+              sh 'cd java-maven-sonar-argocd-helm-k8s/spring-boot-app && mvn clean package'  // we are changing to the path where pom.xml file is present and mvn is already insalled in the docker agent so it will run clean and package commands
+          }
+      }
+      
+      stage('Static code analysis'){
+          environment {
+              SONAR_URL = "http://172.0.20.141:9000"    // use IP address of the sonarqube here
+          }
+          
+          steps{
+              withCredentials([string(credentialsId: 'sonarqube', variable: 'SONAR_AUTH_TOKEN')]) {
+                 sh 'cd java-maven-sonar-argocd-helm-k8s/spring-boot-app && mvn sonar:sonar -Dsonar.login=$SONAR_AUTH_TOKEN -Dsonar.host.url=${SONAR_URL}' // configure credentials in the jenkins using sonarqube password as text
+              }
+          }
+      }
+      
+      stage('Build & Push Docker image'){
+          steps{
+              sh 'cd java-maven-sonar-argocd-helm-k8s/spring-boot-app && docker build -t 8555936327/ultimate-cicd:${BUILD_TAG} .'
+             
+              withCredentials([string(credentialsId: 'DOCKERHUB_CRED_PASSWD', variable: 'DOCKERHUB_PASSWD')]) {  // store dockerhub credentials in the jenkins credentials
+                  sh 'docker login -u 8555936327 -p $DOCKERHUB_PASSWD'    
+                  sh 'docker push 8555936327/ultimate-cicd:${BUILD_TAG}'
+              }
+          }
+      }
+          
+      stage('Update Deployment File') {
+        environment {
+            GIT_REPO_NAME = "Jenkins-pipeline"
+            GIT_USER_NAME = "8555936327"
+        }
+        steps {
+            withCredentials([string(credentialsId: 'github', variable: 'GITHUB_TOKEN')]) { // store github credentials and checkout to different branch which is jenkins to isolate yml file from source code
+                sh '''
+                git config user.email "sbvh1437@gmail.com"
+                git config user.name "8555936327"
+                BUILD_NUMBER=${BUILD_TAG}
+                git checkout jenkins
+                sed -i "19c\\        image: 8555936327/ultimate-cicd:${BUILD_TAG}" java-maven-sonar-argocd-helm-k8s/spring-boot-app-manifests/deployment.yml
+                git add java-maven-sonar-argocd-helm-k8s/spring-boot-app-manifests/deployment.yml
+                git commit -m "Update deployment image to version ${BUILD_TAG}"
+                git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:jenkins
+            '''
+            }
+        }
+      }
+  }
+}
